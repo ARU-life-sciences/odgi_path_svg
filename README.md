@@ -10,6 +10,7 @@ The `odgi draw` SVG output is fairly limited currently, so this is a small tool 
 - Highlights specific (optionally multiple) paths through the pangenome. These are the `P` lines in the GFA.
 - Clips x axes so that extreme values are compressed.
 - Can subsample both edges and paths so the output SVG is smaller.
+- Renders large highlighted paths as chunks, so even absurdly large paths can be viewed in Illustrator.
 
 ## Usage
 
@@ -44,7 +45,7 @@ Options:
       --no-edges                Do not draw edges (only highlighted paths)
       --x-clip-low <PCT>        Lower X clip percentile (0-100); trims extreme left outliers [default: 0.0]
       --x-clip-high <PCT>       Upper X clip percentile (0-100); trims extreme right outliers [default: 100.0]
-      --path-simplify-eps <PX>  Simplify highlighted paths: minimum distance (px) between kept points; 0 disables simplification [default: 0.0]
+      --path-simplify-eps <PX>  Simplify highlighted paths: minimum distance (px) between kept points; 0 disables simplification [default: 3.0]
       --edge-simplify-eps <PX>  Simplify skeleton edges: minimum distance (px) between edge endpoints to draw; 0 draws all edges [default: 0.0]
   -h, --help                    Print help
   -V, --version                 Print version
