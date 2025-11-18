@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 use clap::{Arg, ArgAction, Command};
@@ -136,7 +136,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .help("Simplify highlighted paths: minimum distance (px) between kept points; 0 disables simplification")
                 .value_name("PX")
                 .value_parser(clap::value_parser!(f64))
-                .default_value("0.0"),
+                .default_value("3.0"),
         )
         .arg(
             Arg::new("edge_simplify_eps")
@@ -272,7 +272,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         height
     );
 
-    let mut out = File::create(&output_path)?;
+    let file = File::create(&output_path)?;
+    let mut out = BufWriter::new(file);
 
     render_svg(
         &mut out,
@@ -554,8 +555,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_svg(
-    out: &mut File,
+fn render_svg<W: Write>(
+    out: &mut W,
     width: f64,
     height: f64,
     padding: f64,
@@ -611,23 +612,36 @@ fn render_svg(
 
     // Draw edges (graph skeleton) as light grey, possibly simplified
     if !edges.is_empty() {
-        let segments = simplify_edges(edges, coords, &transform, edge_simplify_eps);
-        eprintln!(
-            "[info] drawing {} skeleton edges (simplified from {})",
-            segments.len(),
-            edges.len()
-        );
-
         writeln!(
             out,
             r##"  <g id="edges" stroke="black" stroke-width="0.4" stroke-linecap="round" opacity="0.7">"##
         )?;
-        for (x1, y1, x2, y2) in segments {
+
+        let eps2 = if edge_simplify_eps > 0.0 {
+            edge_simplify_eps * edge_simplify_eps
+        } else {
+            0.0
+        };
+
+        let mut kept = 0usize;
+
+        for (x1, y1, x2, y2) in simplify_edges(edges, coords, &transform, edge_simplify_eps) {
+            if eps2 > 0.0 {
+                let dx = x2 - x1;
+                let dy = y2 - y1;
+                if dx * dx + dy * dy < eps2 {
+                    continue; // too short, skip
+                }
+            }
+
+            kept += 1;
             writeln!(
                 out,
                 r#"    <line x1="{x1:.3}" y1="{y1:.3}" x2="{x2:.3}" y2="{y2:.3}" />"#
             )?;
         }
+
+        eprintln!("[info] drew {kept} skeleton edges (from {})", edges.len());
         writeln!(out, "  </g>")?;
     }
 
@@ -653,7 +667,8 @@ fn render_svg(
         writeln!(out, r#"  <g id="highlight_paths" fill="none">"#)?;
 
         for (idx, path) in highlight_paths.iter().enumerate() {
-            let mut points = Vec::new();
+            // Build transformed polyline for this path
+            let mut points: Vec<(f64, f64)> = Vec::with_capacity(path.steps.len());
             for step in &path.steps {
                 if let Some(p) = coords.get(&step.node_id) {
                     points.push(transform(p));
@@ -663,23 +678,54 @@ fn render_svg(
                 continue;
             }
 
-            // Downsample the polyline if requested
-            let points = downsample_polyline(&points, path_simplify_eps);
+            // Single downsample in SVG space
+            let mut points = downsample_polyline(&points, path_simplify_eps);
+
+            // Optional hard cap: don't let a single path go totally wild
+            // (this is in SVG points *after* simplification)
+            const MAX_POINTS_PER_PATH: usize = 200_000;
+            if points.len() > MAX_POINTS_PER_PATH {
+                let stride = (points.len() as f64 / MAX_POINTS_PER_PATH as f64).ceil() as usize;
+                eprintln!(
+                    "[info] path {} had {} points after eps-simplify; thinning by stride {stride}",
+                    path.name,
+                    points.len()
+                );
+                points = points.into_iter().step_by(stride.max(1)).collect();
+            }
 
             let color = palette[idx % palette.len()];
             let stroke_width = 2.0; // thicker than skeleton
 
-            let mut d = String::new();
-            let (x0, y0) = points[0];
-            d.push_str(&format!("M {x0:.3} {y0:.3}"));
-            for &(x, y) in &points[1..] {
-                d.push_str(&format!(" L {x:.3} {y:.3}"));
-            }
+            // Chunk into smaller SVG paths *without* cloning each chunk
+            let chunk_len: usize = 400;
+            let mut start = 0usize;
+            while start + 1 < points.len() {
+                let end = (start + chunk_len).min(points.len());
+                let slice = &points[start..end];
+                if slice.len() < 2 {
+                    break;
+                }
 
-            writeln!(
-                out,
-                r#"    <path d="{d}" stroke="{color}" stroke-width="{stroke_width}" opacity="0.95" />"#
-            )?;
+                // Build path string for this chunk
+                let (x0, y0) = slice[0];
+                let mut d = format!("M {x0:.3} {y0:.3}");
+                for &(x, y) in &slice[1..] {
+                    use std::fmt::Write as FmtWrite;
+                    write!(&mut d, " L {x:.3} {y:.3}").unwrap();
+                }
+
+                writeln!(
+                    out,
+                    r#"    <path d="{d}" stroke="{color}" stroke-width="{stroke_width}" opacity="0.95" />"#
+                )?;
+
+                if end == points.len() {
+                    break;
+                }
+                // Overlap by 1 point to keep continuity
+                start = end - 1;
+            }
         }
 
         writeln!(out, "  </g>")?;
